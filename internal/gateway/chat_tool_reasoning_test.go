@@ -9,11 +9,13 @@ import (
 )
 
 // deepseekRefuseToolTurns answers as DeepSeek's Chat API does in thinking
-// mode (checked against api.deepseek.com, October 2026): a tool call made
-// since the user's last message that comes back without reasoning_content
-// turns the whole request away, as does a reply to a tool result without
-// it, while an empty one, another reply's, or one
-// from before the user's last message missing are taken.
+// mode (checked against api.deepseek.com and a relay of it, October 2026): a
+// tool call made since the user's last message that comes back without
+// reasoning_content turns the whole request away, as does a reply to a tool
+// result without it, while an empty one, another reply's, or one from before
+// the user's last message missing are taken. A message that carries the
+// thinking in both reasoning_content and reasoning is turned away as a
+// duplicate field, which is how it reads the two spellings as one field.
 func deepseekRefuseToolTurns(body []byte) (int, string) {
 	var q struct {
 		Messages []map[string]json.RawMessage `json:"messages"`
@@ -27,6 +29,9 @@ func deepseekRefuseToolTurns(body []byte) (int, string) {
 	}
 	afterTool := false
 	for _, m := range q.Messages[last+1:] {
+		if _, both := m["reasoning"]; both && m["reasoning_content"] != nil {
+			return 400, `{"error":{"code":"json_parse_error","message":"Failed to deserialize the JSON body into the target type: duplicate field ` + "`reasoning`" + `","param":null,"type":"invalid_request_error"}}`
+		}
 		// a reply to a tool result too (checked 2026-10-12, #1822)
 		if string(m["role"]) == `"assistant"` && (len(m["tool_calls"]) > 0 || afterTool) && m["reasoning_content"] == nil {
 			return 400, `{"error":{"message":"The ` + "`reasoning_content`" + ` in the thinking mode must be passed back to the API. (request_id: 06048513-d7c7-4cdf-9998-47bfc20484e6)","type":"invalid_request_error","param":null,"code":"invalid_request_error"}}`
@@ -84,7 +89,7 @@ func TestChatToolTurnWithoutReasoningRelayed(t *testing.T) {
 		sameJSON(t, ms[1], `{"role":"assistant","content":"Hello!"}`)
 		sameJSON(t, ms[3], `{"role":"assistant","content":null,"tool_calls":[`+timeCall+`],"reasoning_content":" "}`)
 		sameJSON(t, ms[5], `{"role":"assistant","content":null,"tool_calls":[{"id":"call_2","type":"function","function":{"name":"get_time","arguments":"{}"}}],"reasoning_content":"Once more."}`)
-		sameJSON(t, ms[7], `{"role":"assistant","content":null,"tool_calls":[{"id":"call_3","type":"function","function":{"name":"get_time","arguments":"{}"}}],"reasoning":"OpenRouter's field.","reasoning_content":"OpenRouter's field."}`)
+		sameJSON(t, ms[7], `{"role":"assistant","content":null,"tool_calls":[{"id":"call_3","type":"function","function":{"name":"get_time","arguments":"{}"}}],"reasoning_content":"OpenRouter's field."}`)
 		sameJSON(t, ms[4], `{"role":"tool","tool_call_id":"call_1","content":"12:00"}`)
 	}
 
@@ -97,6 +102,24 @@ func TestChatToolTurnWithoutReasoningRelayed(t *testing.T) {
 	if strings.Contains(string(f.got), `"reasoning_content":" "`) || strings.Count(string(f.got), "reasoning_content") != 1 {
 		t.Errorf("glm was given reasoning: %s", f.got)
 	}
+}
+
+// A reply that carries its thinking in both of DeepSeek's spellings, with no
+// tool call in the request at all, goes with reasoning_content alone: the
+// upstream reads the two as one field and would turn the request away as a
+// duplicate field otherwise.
+func TestChatBothReasoningSpellingsRelayed(t *testing.T) {
+	f := &fake{t: t, reply: chatWholeOK, ctype: "application/json", refuse: deepseekRefuseToolTurns}
+	up := setup(t, provider.Chat, f)
+	chatProvider(t, up.URL, provider.Provider{ID: "ds", Models: []string{"deepseek-v4.1-flash"}})
+	code, body := postTo(t, New(), "/v1/chat/completions", `{"model":"ds/deepseek-v4.1-flash","stream":false,"messages":[
+		{"role":"user","content":"hi"},
+		{"role":"assistant","content":"Hello!","reasoning":"the thinking","reasoning_content":"the thinking"},
+		{"role":"user","content":"again"}]}`)
+	if code != 200 || f.calls != 1 {
+		t.Fatalf("%d after %d calls: %s", code, f.calls, body)
+	}
+	sameJSON(t, sentMessages(t, f.got)[1], `{"role":"assistant","content":"Hello!","reasoning_content":"the thinking"}`)
 }
 
 // Mistral, which turns reasoning_content away (#494), is given none for a

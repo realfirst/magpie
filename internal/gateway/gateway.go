@@ -4255,8 +4255,11 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		body = silentAssistantsOut(body)
 		if mistral := p.Preset == "mistral" || p.Host() == "api.mistral.ai"; !mistral && (chatReplaysReasoning(buildHost(p), model) || chatReplaysReasoning(buildHost(p), upstream)) {
 			// a tool call the client kept no thinking for, which DeepSeek
-			// turns the whole request away for (#1462)
-			body = withReasoningOnToolTurns(body)
+			// turns the whole request away for (#1462), and the thinking it
+			// did keep, once only: DeepSeek reads reasoning and
+			// reasoning_content as one field and turns a message with both
+			// away as a duplicate field
+			body = foldReasoningAliases(withReasoningOnToolTurns(body))
 		}
 		// Gemini's thought signatures, which came to the client in its
 		// calls' ids, go back where Gemini wants them; another upstream
